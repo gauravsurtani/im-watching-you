@@ -1,6 +1,7 @@
 """Data ingestion service for processing synced files.
 
 Monitors Syncthing folders and ingests new data into the database.
+All classification is done by LLM - no rule-based heuristics.
 """
 
 import hashlib
@@ -13,17 +14,22 @@ import aiofiles
 
 from lifelogger.core.config import Settings, get_settings
 from lifelogger.core.database import Database
+from lifelogger.core.llm import LLMService, classify_events_batch, get_llm_service
 from lifelogger.core.models import ActivityEvent
-from lifelogger.sources.activitywatch import ActivityWatchSource
 from lifelogger.sources.transcripts import TranscriptSource
 
 
 class IngestService:
-    """Ingest synced data files into the database."""
+    """Ingest synced data files into the database.
+
+    Events are stored without classification first. LLM classification
+    can be done inline during ingestion or as a separate batch process.
+    """
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self.db: Database | None = None
+        self.llm: LLMService | None = None
 
     async def _ensure_db(self) -> Database:
         """Ensure database connection exists."""
@@ -32,8 +38,22 @@ class IngestService:
             await self.db.connect()
         return self.db
 
-    async def ingest_activity_files(self, directory: Path | None = None) -> dict[str, int]:
+    async def _ensure_llm(self) -> LLMService:
+        """Ensure LLM service exists."""
+        if self.llm is None:
+            self.llm = get_llm_service(self.settings)
+        return self.llm
+
+    async def ingest_activity_files(
+        self,
+        directory: Path | None = None,
+        classify: bool = False,
+    ) -> dict[str, int]:
         """Ingest all ActivityWatch JSON files from the sync directory.
+
+        Args:
+            directory: Directory to scan (defaults to settings.sync_activity_path)
+            classify: If True, run LLM classification during ingestion
 
         Returns:
             Dict mapping file paths to number of events ingested.
@@ -54,7 +74,7 @@ class IngestService:
                 continue
 
             try:
-                count = await self._ingest_activity_file(db, json_file)
+                count = await self._ingest_activity_file(db, json_file, classify=classify)
                 await self._mark_processed(json_file, file_hash, count)
                 results[str(json_file)] = count
             except Exception as e:
@@ -63,8 +83,20 @@ class IngestService:
 
         return results
 
-    async def ingest_transcript_files(self, directory: Path | None = None) -> dict[str, int]:
-        """Ingest all transcript JSON files from the sync directory."""
+    async def ingest_transcript_files(
+        self,
+        directory: Path | None = None,
+        analyze: bool = False,
+    ) -> dict[str, int]:
+        """Ingest all transcript JSON files from the sync directory.
+
+        Args:
+            directory: Directory to scan
+            analyze: If True, run LLM analysis during ingestion
+
+        Returns:
+            Dict mapping file paths to number of transcripts ingested.
+        """
         db = await self._ensure_db()
         directory = directory or self.settings.sync_transcripts_path
 
@@ -82,14 +114,23 @@ class IngestService:
 
             try:
                 transcript = await source.import_from_file(json_file)
+
+                # Optionally analyze with LLM
+                if analyze:
+                    llm = await self._ensure_llm()
+                    from lifelogger.core.llm import analyze_transcript
+                    analysis = await analyze_transcript(llm, transcript.full_text)
+                    transcript.analysis = analysis.model_dump()
+
                 event = source.transcript_to_activity_event(transcript)
 
                 await db.insert_activity_event(
                     timestamp=event.timestamp,
                     device_id=event.device_id,
-                    event_type=event.event_type.value,
+                    source=event.source,
                     duration_seconds=event.duration_seconds,
                     data=event.data,
+                    classification=event.classification,
                 )
 
                 await self._mark_processed(json_file, file_hash, 1)
@@ -100,7 +141,12 @@ class IngestService:
 
         return results
 
-    async def _ingest_activity_file(self, db: Database, file_path: Path) -> int:
+    async def _ingest_activity_file(
+        self,
+        db: Database,
+        file_path: Path,
+        classify: bool = False,
+    ) -> int:
         """Ingest a single ActivityWatch export file."""
         async with aiofiles.open(file_path, "r") as f:
             content = await f.read()
@@ -116,8 +162,7 @@ class IngestService:
         else:
             return 0
 
-        # Convert to our event format
-        source = ActivityWatchSource(device_id=device_id)
+        # Convert to our event format (no classification yet)
         db_events: list[dict[str, Any]] = []
 
         for raw_event in events:
@@ -126,19 +171,90 @@ class IngestService:
                 db_events.append({
                     "timestamp": event.timestamp,
                     "device_id": event.device_id,
-                    "event_type": event.event_type.value,
+                    "source": event.source,
                     "app_name": event.app_name,
                     "window_title": event.window_title,
+                    "url": event.url,
                     "duration_seconds": event.duration_seconds,
                     "data": event.data,
+                    "classification": None,  # Will be populated by LLM if classify=True
                 })
             except Exception as e:
                 print(f"Warning: Failed to convert event: {e}")
                 continue
 
+        # Optionally classify with LLM before insertion
+        if classify and db_events:
+            llm = await self._ensure_llm()
+            classifications = await classify_events_batch(llm, db_events)
+            for event, classification in zip(db_events, classifications):
+                event["classification"] = classification.model_dump()
+
         if db_events:
             return await db.insert_activity_events_batch(db_events)
         return 0
+
+    async def classify_unclassified_events(
+        self,
+        batch_size: int = 50,
+        max_events: int = 500,
+    ) -> int:
+        """Classify events that don't have LLM classification yet.
+
+        This can be run as a background task to catch up on classification.
+
+        Args:
+            batch_size: Number of events to classify per LLM call
+            max_events: Maximum total events to process
+
+        Returns:
+            Number of events classified
+        """
+        db = await self._ensure_db()
+        llm = await self._ensure_llm()
+
+        # Get unclassified events
+        events = await db.get_unclassified_events(limit=max_events)
+
+        if not events:
+            return 0
+
+        # Classify in batches
+        total_classified = 0
+
+        for i in range(0, len(events), batch_size):
+            batch = events[i : i + batch_size]
+
+            # Prepare batch for classification
+            classify_batch = [
+                {
+                    "app_name": e.get("app_name"),
+                    "window_title": e.get("window_title"),
+                    "url": e.get("url"),
+                    "duration": e.get("duration_seconds"),
+                    "data": e.get("data"),
+                }
+                for e in batch
+            ]
+
+            try:
+                classifications = await classify_events_batch(
+                    llm, classify_batch, batch_size=batch_size
+                )
+
+                # Update database
+                updates = [
+                    (e["id"], e["timestamp"], c.model_dump())
+                    for e, c in zip(batch, classifications)
+                ]
+                await db.batch_update_classifications(updates)
+                total_classified += len(updates)
+
+            except Exception as e:
+                print(f"Error classifying batch: {e}")
+                continue
+
+        return total_classified
 
     async def _file_hash(self, file_path: Path) -> str:
         """Calculate SHA-256 hash of a file."""
@@ -192,11 +308,23 @@ class IngestService:
                 event_count,
             )
 
-    async def run_full_ingest(self) -> dict[str, Any]:
-        """Run a full ingestion cycle for all data types."""
+    async def run_full_ingest(
+        self,
+        classify: bool = False,
+        analyze_transcripts: bool = False,
+    ) -> dict[str, Any]:
+        """Run a full ingestion cycle for all data types.
+
+        Args:
+            classify: If True, classify activity events with LLM
+            analyze_transcripts: If True, analyze transcripts with LLM
+
+        Returns:
+            Summary of ingestion results
+        """
         results = {
-            "activity": await self.ingest_activity_files(),
-            "transcripts": await self.ingest_transcript_files(),
+            "activity": await self.ingest_activity_files(classify=classify),
+            "transcripts": await self.ingest_transcript_files(analyze=analyze_transcripts),
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -208,6 +336,8 @@ class IngestService:
             "activity_events": activity_count,
             "transcripts": transcript_count,
             "files_processed": len(results["activity"]) + len(results["transcripts"]),
+            "llm_classification": classify,
+            "llm_analysis": analyze_transcripts,
         }
 
         return results
@@ -223,25 +353,22 @@ def _extract_device_from_path(file_path: Path) -> str:
 
 
 def _convert_raw_aw_event(event: dict[str, Any], device_id: str) -> ActivityEvent:
-    """Convert a raw ActivityWatch event to our format."""
+    """Convert a raw ActivityWatch event to our format.
+
+    NOTE: No classification here. Events are stored raw.
+    """
     from dateutil.parser import parse as parse_datetime
-    from lifelogger.core.models import EventType
 
     data = event.get("data", {})
-
-    # Determine event type
-    event_type = EventType.APP_USAGE
-    if "url" in data:
-        event_type = EventType.BROWSER
-    elif "status" in data:
-        event_type = EventType.AFK
 
     return ActivityEvent(
         timestamp=parse_datetime(event["timestamp"]),
         device_id=device_id,
-        event_type=event_type,
+        source="activitywatch",
         app_name=data.get("app"),
         window_title=data.get("title"),
+        url=data.get("url"),
         duration_seconds=event.get("duration"),
         data=data,
+        classification=None,
     )

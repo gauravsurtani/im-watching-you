@@ -1,4 +1,7 @@
-"""Command-line interface for lifelogger."""
+"""Command-line interface for lifelogger.
+
+All classification and analysis is LLM-powered - no regex or rule-based heuristics.
+"""
 
 import asyncio
 from datetime import date, datetime
@@ -14,33 +17,80 @@ console = Console()
 @click.group()
 @click.version_option()
 def main():
-    """Lifelogger - Privacy-first personal second brain."""
+    """Lifelogger - Privacy-first personal second brain.
+
+    All categorization and classification is powered by local LLM.
+    """
     pass
 
 
 @main.command()
 @click.option("--activity-dir", type=click.Path(exists=True, path_type=Path), help="Activity data directory")
 @click.option("--transcripts-dir", type=click.Path(exists=True, path_type=Path), help="Transcripts directory")
-def ingest(activity_dir: Path | None, transcripts_dir: Path | None):
-    """Ingest synced data files into the database."""
+@click.option("--classify/--no-classify", default=False, help="Run LLM classification during ingestion")
+@click.option("--analyze/--no-analyze", default=False, help="Run LLM analysis on transcripts")
+def ingest(activity_dir: Path | None, transcripts_dir: Path | None, classify: bool, analyze: bool):
+    """Ingest synced data files into the database.
+
+    By default, data is ingested raw without classification. Use --classify
+    to run LLM classification during ingestion (slower but more convenient).
+    """
     from lifelogger.core.ingest import IngestService
 
     async def run():
         service = IngestService()
 
-        with console.status("Ingesting data..."):
+        status_msg = "Ingesting data"
+        if classify:
+            status_msg += " with LLM classification"
+        if analyze:
+            status_msg += " with transcript analysis"
+        status_msg += "..."
+
+        with console.status(status_msg):
             if activity_dir:
-                results = await service.ingest_activity_files(activity_dir)
+                results = {"activity": await service.ingest_activity_files(activity_dir, classify=classify)}
+                results["summary"] = {"activity_events": sum(v for v in results["activity"].values() if v > 0)}
             elif transcripts_dir:
-                results = await service.ingest_transcript_files(transcripts_dir)
+                results = {"transcripts": await service.ingest_transcript_files(transcripts_dir, analyze=analyze)}
+                results["summary"] = {"transcripts": sum(v for v in results["transcripts"].values() if v > 0)}
             else:
-                results = await service.run_full_ingest()
+                results = await service.run_full_ingest(classify=classify, analyze_transcripts=analyze)
 
         summary = results.get("summary", {})
         console.print(f"[green]Ingestion complete![/green]")
         console.print(f"  Activity events: {summary.get('activity_events', 0)}")
         console.print(f"  Transcripts: {summary.get('transcripts', 0)}")
         console.print(f"  Files processed: {summary.get('files_processed', 0)}")
+        if classify or analyze:
+            console.print(f"  LLM classification: {'enabled' if classify else 'disabled'}")
+            console.print(f"  LLM analysis: {'enabled' if analyze else 'disabled'}")
+
+    asyncio.run(run())
+
+
+@main.command()
+@click.option("--batch-size", default=50, help="Events to classify per LLM batch")
+@click.option("--max-events", default=500, help="Maximum events to classify")
+def classify(batch_size: int, max_events: int):
+    """Classify unclassified events using LLM.
+
+    This can be run as a catch-up job to classify events that were
+    ingested without the --classify flag.
+    """
+    from lifelogger.core.ingest import IngestService
+
+    async def run():
+        service = IngestService()
+
+        with console.status(f"Classifying up to {max_events} events..."):
+            count = await service.classify_unclassified_events(
+                batch_size=batch_size,
+                max_events=max_events,
+            )
+
+        console.print(f"[green]Classification complete![/green]")
+        console.print(f"  Events classified: {count}")
 
     asyncio.run(run())
 
@@ -51,14 +101,14 @@ def ingest(activity_dir: Path | None, transcripts_dir: Path | None):
 @click.option("--send/--no-send", default=False, help="Send notification after generation")
 @click.option("--output", "-o", type=click.Path(path_type=Path), help="Save digest to file")
 def digest(target_date: datetime, send: bool, output: Path | None):
-    """Generate a daily digest."""
+    """Generate a daily digest using LLM."""
     from lifelogger.exporters.digest import DigestGenerator, render_digest_markdown
     from lifelogger.exporters.notifications import NotificationService
 
     async def run():
         generator = DigestGenerator()
 
-        with console.status(f"Generating digest for {target_date.date()}..."):
+        with console.status(f"Generating digest for {target_date.date()} (LLM-powered)..."):
             digest_result = await generator.generate_digest(target_date.date())
 
         markdown = render_digest_markdown(digest_result)
@@ -199,8 +249,10 @@ def setup():
     console.print("   - Set up scheduled task to run the export script\n")
 
     console.print("6. Set up cron jobs on server (example):")
-    console.print("   [dim]# Hourly data ingestion[/dim]")
+    console.print("   [dim]# Hourly data ingestion (fast, no classification)[/dim]")
     console.print("   [dim]0 * * * * cd /path/to/im-watching-you && python -m lifelogger ingest[/dim]")
+    console.print("   [dim]# Daily classification catch-up[/dim]")
+    console.print("   [dim]0 6 * * * cd /path/to/im-watching-you && python -m lifelogger classify[/dim]")
     console.print("   [dim]# Daily digest at 7 AM[/dim]")
     console.print("   [dim]0 7 * * * cd /path/to/im-watching-you && python -m lifelogger digest --send[/dim]")
 

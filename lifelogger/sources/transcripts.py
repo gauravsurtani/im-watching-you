@@ -1,17 +1,19 @@
 """Transcript data source adapter.
 
 Handles importing transcribed audio data from JSON files synced via Syncthing.
+
+NOTE: No rule-based classification here. Transcripts are stored raw and
+analyzed by the LLM service during or after ingestion.
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
 import aiofiles
 from dateutil.parser import parse as parse_datetime
 
-from lifelogger.core.models import ActivityEvent, EventType, Transcript, TranscriptSegment
+from lifelogger.core.models import ActivityEvent, Transcript, TranscriptSegment
 
 
 class TranscriptSource:
@@ -46,6 +48,7 @@ class TranscriptSource:
             duration_seconds=data.get("duration", 0),
             language=data.get("language", "en"),
             segments=segments,
+            analysis=None,  # Will be populated by LLM
         )
 
     async def import_from_directory(
@@ -61,18 +64,23 @@ class TranscriptSource:
                 continue
 
     def transcript_to_activity_event(self, transcript: Transcript) -> ActivityEvent:
-        """Convert a Transcript to an ActivityEvent for database storage."""
+        """Convert a Transcript to an ActivityEvent for database storage.
+
+        NOTE: No classification here. Stored as source="transcript".
+        """
         return ActivityEvent(
             timestamp=transcript.timestamp,
             device_id=transcript.device_id,
-            event_type=EventType.TRANSCRIPT,
+            source="transcript",
             duration_seconds=transcript.duration_seconds,
             data={
                 "full_text": transcript.full_text,
                 "language": transcript.language,
                 "audio_file": transcript.audio_file,
                 "segment_count": len(transcript.segments),
+                "analysis": transcript.analysis,  # May be None until LLM processes it
             },
+            classification=None,  # Will be populated by LLM
         )
 
 
@@ -85,9 +93,11 @@ def _extract_device_from_path(file_path: Path) -> str:
     return "unknown"
 
 
-# Whisper output format converter
 def parse_whisper_output(whisper_json: dict) -> list[TranscriptSegment]:
-    """Parse whisper.cpp JSON output format into TranscriptSegments."""
+    """Parse whisper.cpp JSON output format into TranscriptSegments.
+
+    Uses time field parsing that matches whisper.cpp's output format.
+    """
     segments = []
     for seg in whisper_json.get("transcription", []):
         # whisper.cpp format uses "timestamps" with "from" and "to"
@@ -103,9 +113,15 @@ def parse_whisper_output(whisper_json: dict) -> list[TranscriptSegment]:
 
 
 def _parse_whisper_time(time_str: str) -> float:
-    """Parse whisper.cpp timestamp format (HH:MM:SS.mmm) to seconds."""
+    """Parse whisper.cpp timestamp format (HH:MM:SS.mmm) to seconds.
+
+    This parses a fixed, known format from whisper.cpp output.
+    """
+    # Split by colon to get hours, minutes, seconds
     parts = time_str.split(":")
     if len(parts) == 3:
-        hours, minutes, seconds = parts
-        return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+        return hours * 3600 + minutes * 60 + seconds
     return 0.0

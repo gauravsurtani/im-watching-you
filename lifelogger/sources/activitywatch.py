@@ -2,6 +2,9 @@
 
 Handles importing activity data from ActivityWatch exports (JSON format).
 Supports both direct API queries and file-based imports from Syncthing.
+
+NOTE: No rule-based classification here. Events are stored raw and
+classified by the LLM service during or after ingestion.
 """
 
 import json
@@ -13,7 +16,7 @@ import aiofiles
 import aiohttp
 from dateutil.parser import parse as parse_datetime
 
-from lifelogger.core.models import ActivityEvent, EventType
+from lifelogger.core.models import ActivityEvent
 
 
 class ActivityWatchSource:
@@ -88,24 +91,26 @@ def _extract_device_from_path(file_path: Path) -> str:
 
 
 def _convert_aw_event(event: dict[str, Any], device_id: str) -> ActivityEvent:
-    """Convert an ActivityWatch event to our ActivityEvent format."""
+    """Convert an ActivityWatch event to our ActivityEvent format.
+
+    NOTE: No classification is done here. The event is stored raw with
+    source="activitywatch". Classification happens via LLM later.
+    """
     data = event.get("data", {})
 
-    # Determine event type based on data contents
-    event_type = EventType.APP_USAGE
-    if "url" in data:
-        event_type = EventType.BROWSER
-    elif "status" in data:
-        event_type = EventType.AFK
+    # Extract URL if present (for browser events)
+    url = data.get("url")
 
     return ActivityEvent(
         timestamp=parse_datetime(event["timestamp"]),
         device_id=device_id,
-        event_type=event_type,
+        source="activitywatch",
         app_name=data.get("app"),
         window_title=data.get("title"),
+        url=url,
         duration_seconds=event.get("duration"),
-        data=data,
+        data=data,  # Store all raw data
+        classification=None,  # Will be populated by LLM
     )
 
 

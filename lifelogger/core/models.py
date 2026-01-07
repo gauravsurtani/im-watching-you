@@ -1,37 +1,46 @@
-"""Data models for lifelogger."""
+"""Data models for lifelogger.
+
+All categorization is done via LLM - no hardcoded rules.
+"""
 
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class EventType(str, Enum):
-    """Types of events that can be logged."""
-
-    APP_USAGE = "app_usage"
-    BROWSER = "browser"
-    AFK = "afk"
-    TRANSCRIPT = "transcript"
-    YOUTUBE = "youtube_watch"
-    CALENDAR = "calendar"
-    CUSTOM = "custom"
-
-
 class ActivityEvent(BaseModel):
-    """A single activity event from any source."""
+    """A single activity event from any source.
+
+    Events are stored with raw data. Classification is done
+    by the LLM and stored in the `classification` field.
+    """
 
     timestamp: datetime
     device_id: str
-    event_type: EventType
+    source: str  # "activitywatch", "transcript", "youtube", "browser", etc.
     app_name: str | None = None
     window_title: str | None = None
+    url: str | None = None
     duration_seconds: float | None = None
     data: dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        use_enum_values = True
+    # LLM-derived classification (populated by enrichment)
+    classification: dict[str, Any] | None = None
+
+
+class LLMClassification(BaseModel):
+    """LLM-derived classification for an event.
+
+    Stored in ActivityEvent.classification field.
+    """
+
+    event_type: str  # LLM-determined type
+    category: str  # High-level category
+    subcategory: str | None = None
+    is_productive: bool | None = None
+    description: str
+    confidence: float
 
 
 class TranscriptSegment(BaseModel):
@@ -54,14 +63,34 @@ class Transcript(BaseModel):
     language: str = "en"
     segments: list[TranscriptSegment] = Field(default_factory=list)
 
+    # LLM-derived analysis (populated by enrichment)
+    analysis: dict[str, Any] | None = None
+
     @property
     def full_text(self) -> str:
         """Get the complete transcript text."""
         return " ".join(seg.text for seg in self.segments)
 
 
+class TranscriptAnalysis(BaseModel):
+    """LLM-derived analysis of a transcript.
+
+    Stored in Transcript.analysis field.
+    """
+
+    summary: str
+    topics: list[str]
+    action_items: list[str]
+    ideas: list[str]
+    people_mentioned: list[str]
+    content_referenced: list[str]
+    sentiment: str
+    key_quotes: list[str]
+    follow_ups: list[str]
+
+
 class DailyDigest(BaseModel):
-    """A daily summary digest."""
+    """A daily summary digest - fully LLM-generated."""
 
     date: datetime
     time_summary: str

@@ -1,17 +1,19 @@
 """YouTube watch history data source.
 
 Imports watch history from Google Takeout exports.
+
+NOTE: No rule-based URL parsing or classification here. Raw data is stored
+and the LLM enriches it with structured metadata during or after ingestion.
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
 import aiofiles
 from dateutil.parser import parse as parse_datetime
 
-from lifelogger.core.models import ActivityEvent, EventType
+from lifelogger.core.models import ActivityEvent
 
 
 class YouTubeSource:
@@ -53,41 +55,50 @@ class YouTubeSource:
 
 
 def _convert_youtube_item(item: dict, device_id: str) -> ActivityEvent | None:
-    """Convert a YouTube history item to ActivityEvent."""
-    # Skip ads and other non-video entries
+    """Convert a YouTube history item to ActivityEvent.
+
+    NOTE: No URL parsing or metadata extraction here. The raw item data
+    is stored and the LLM will extract/enrich structured metadata.
+    """
+    # Skip entries without URLs (ads, etc.)
     if "titleUrl" not in item:
         return None
 
-    # Parse timestamp (format: "2024-01-07T14:30:00.000Z")
+    # Parse timestamp
     try:
         timestamp = parse_datetime(item["time"])
     except (KeyError, ValueError):
         return None
 
-    # Extract channel name from subtitles array
-    channel = None
+    # Store raw title - LLM will clean up the "Watched " prefix
+    title = item.get("title", "")
+
+    # Get channel info if available
     subtitles = item.get("subtitles", [])
+    channel = None
     if subtitles and isinstance(subtitles[0], dict):
         channel = subtitles[0].get("name")
-
-    # Extract video ID from URL
-    url = item.get("titleUrl", "")
-    video_id = None
-    if "watch?v=" in url:
-        video_id = url.split("watch?v=")[-1].split("&")[0]
 
     return ActivityEvent(
         timestamp=timestamp,
         device_id=device_id,
-        event_type=EventType.YOUTUBE,
+        source="youtube",
         app_name="YouTube",
-        window_title=item.get("title", "").replace("Watched ", ""),
+        window_title=title,
+        url=item.get("titleUrl"),
         data={
-            "url": url,
-            "video_id": video_id,
+            # Store raw data - LLM will extract structured fields
+            "raw_title": title,
+            "url": item.get("titleUrl"),
             "channel": channel,
-            "title": item.get("title", "").replace("Watched ", ""),
+            "subtitles": subtitles,
+            # These will be populated by LLM enrichment:
+            # "video_id": ...,
+            # "clean_title": ...,
+            # "content_type": ...,
+            # "topics": [...],
         },
+        classification=None,  # Will be populated by LLM
     )
 
 

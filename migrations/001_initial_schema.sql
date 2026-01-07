@@ -1,19 +1,25 @@
 -- Initial schema for lifelogger
 -- This file is automatically executed when TimescaleDB container starts
+--
+-- NOTE: All categorization is LLM-powered. The 'source' field indicates
+-- where data came from. LLM classification is stored in the 'classification' JSONB field.
 
 -- Enable TimescaleDB extension
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Main activity events table
+-- Events are stored with raw data; classification is done by LLM
 CREATE TABLE IF NOT EXISTS activity_events (
     id BIGSERIAL,
     timestamp TIMESTAMPTZ NOT NULL,
     device_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
+    source TEXT NOT NULL,  -- "activitywatch", "transcript", "youtube", etc.
     app_name TEXT,
     window_title TEXT,
+    url TEXT,
     duration_seconds DOUBLE PRECISION,
-    data JSONB,
+    data JSONB,  -- Raw source data
+    classification JSONB,  -- LLM-derived classification
     created_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (id, timestamp)
 );
@@ -25,16 +31,28 @@ SELECT create_hypertable('activity_events', 'timestamp', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_activity_device_timestamp
     ON activity_events (device_id, timestamp DESC);
 
-CREATE INDEX IF NOT EXISTS idx_activity_event_type
-    ON activity_events (event_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_source
+    ON activity_events (source, timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_activity_app_name
     ON activity_events (app_name, timestamp DESC)
     WHERE app_name IS NOT NULL;
 
--- GIN index for JSONB queries
+-- GIN indexes for JSONB queries
 CREATE INDEX IF NOT EXISTS idx_activity_data_gin
     ON activity_events USING GIN (data);
+
+CREATE INDEX IF NOT EXISTS idx_activity_classification_gin
+    ON activity_events USING GIN (classification);
+
+-- Index for LLM classification queries
+CREATE INDEX IF NOT EXISTS idx_classification_type
+    ON activity_events ((classification->>'event_type'), timestamp DESC)
+    WHERE classification IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_classification_category
+    ON activity_events ((classification->>'category'), timestamp DESC)
+    WHERE classification IS NOT NULL;
 
 -- Continuous aggregate for daily app usage (auto-refreshed)
 CREATE MATERIALIZED VIEW IF NOT EXISTS daily_app_usage
@@ -46,7 +64,7 @@ SELECT
     SUM(duration_seconds) as total_seconds,
     COUNT(*) as event_count
 FROM activity_events
-WHERE event_type = 'app_usage' AND app_name IS NOT NULL
+WHERE app_name IS NOT NULL
 GROUP BY day, device_id, app_name
 WITH NO DATA;
 
@@ -90,6 +108,18 @@ CREATE TABLE IF NOT EXISTS sync_status (
     processed_at TIMESTAMPTZ DEFAULT NOW(),
     event_count INTEGER,
     UNIQUE(device_id, file_path, file_hash)
+);
+
+-- LLM processing queue for batch classification
+CREATE TABLE IF NOT EXISTS llm_processing_queue (
+    id SERIAL PRIMARY KEY,
+    event_id BIGINT NOT NULL,
+    event_timestamp TIMESTAMPTZ NOT NULL,
+    status TEXT DEFAULT 'pending',  -- 'pending', 'processing', 'completed', 'failed'
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    processed_at TIMESTAMPTZ,
+    error_message TEXT,
+    UNIQUE(event_id, event_timestamp)
 );
 
 -- Retention policy: auto-delete old data (configurable)
