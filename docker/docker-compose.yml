@@ -1,0 +1,90 @@
+version: "3.8"
+
+services:
+  # TimescaleDB for event storage
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: lifelogger-db
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: lifelogger
+      POSTGRES_USER: lifelogger
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-lifelogger}
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifelogger -d lifelogger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama for local LLM
+  ollama:
+    image: ollama/ollama:latest
+    container_name: lifelogger-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Comment out deploy section if no NVIDIA GPU available
+
+  # ntfy for push notifications
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: lifelogger-ntfy
+    restart: unless-stopped
+    command:
+      - serve
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ntfy_cache:/var/cache/ntfy
+      - ntfy_data:/var/lib/ntfy
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Syncthing for cross-device sync
+  syncthing:
+    image: syncthing/syncthing:latest
+    container_name: lifelogger-syncthing
+    restart: unless-stopped
+    hostname: lifelogger-server
+    ports:
+      - "127.0.0.1:8384:8384"  # Web UI
+      - "22000:22000/tcp"       # Sync protocol
+      - "22000:22000/udp"       # Sync protocol
+      - "21027:21027/udp"       # Discovery
+    volumes:
+      - syncthing_config:/var/syncthing/config
+      - ${SYNC_DATA_PATH:-~/Syncthing/lifelogger}:/var/syncthing/data/lifelogger
+    environment:
+      - PUID=1000
+      - PGID=1000
+
+volumes:
+  timescaledb_data:
+  ollama_data:
+  ntfy_cache:
+  ntfy_data:
+  syncthing_config:
