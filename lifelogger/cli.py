@@ -223,6 +223,314 @@ def notify(message: str, title: str):
     asyncio.run(run())
 
 
+@main.command("weekly-digest")
+@click.option("--weeks-back", default=0, help="Weeks back from current week (0 = this week)")
+@click.option("--send/--no-send", default=False, help="Send notification after generation")
+@click.option("--output", "-o", type=click.Path(path_type=Path), help="Save digest to file")
+def weekly_digest(weeks_back: int, send: bool, output: Path | None):
+    """Generate a weekly digest using LLM."""
+    from datetime import timedelta
+    from lifelogger.exporters.digest import DigestGenerator, render_digest_markdown
+
+    async def run():
+        generator = DigestGenerator()
+
+        # Calculate week start (Monday)
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday() + (weeks_back * 7))
+        week_end = week_start + timedelta(days=6)
+
+        with console.status(f"Generating weekly digest for {week_start} to {week_end} (LLM-powered)..."):
+            # Generate digests for each day of the week
+            all_digests = []
+            for day_offset in range(7):
+                day = week_start + timedelta(days=day_offset)
+                if day <= today:
+                    try:
+                        day_digest = await generator.generate_digest(day)
+                        all_digests.append((day, day_digest))
+                    except Exception as e:
+                        console.print(f"[yellow]Skipping {day}: {e}[/yellow]")
+
+        # Combine into weekly summary
+        console.print(f"\n[bold]Weekly Digest: {week_start} - {week_end}[/bold]\n")
+
+        for day, digest_result in all_digests:
+            console.print(f"[cyan]== {day.strftime('%A, %B %d')} ==[/cyan]")
+            markdown = render_digest_markdown(digest_result)
+            console.print(markdown)
+            console.print()
+
+        if output:
+            full_content = f"# Weekly Digest: {week_start} - {week_end}\n\n"
+            for day, digest_result in all_digests:
+                full_content += f"## {day.strftime('%A, %B %d')}\n\n"
+                full_content += render_digest_markdown(digest_result) + "\n\n"
+            output.write_text(full_content)
+            console.print(f"[dim]Saved to {output}[/dim]")
+
+        if send:
+            from lifelogger.exporters.notifications import NotificationService
+            with console.status("Sending notification..."):
+                notifier = NotificationService()
+                # Send summary of the week
+                if all_digests:
+                    success = await notifier.send_alert(
+                        f"Weekly Digest: {week_start} - {week_end}",
+                        f"Generated digests for {len(all_digests)} days. Check your dashboard for details."
+                    )
+                    if success:
+                        console.print("[green]Notification sent![/green]")
+                    else:
+                        console.print("[red]Failed to send notification[/red]")
+
+    asyncio.run(run())
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", default=8000, help="Port to bind to")
+@click.option("--reload", is_flag=True, help="Enable auto-reload for development")
+def web(host: str, port: int, reload: bool):
+    """Start the web dashboard server."""
+    import uvicorn
+    from lifelogger.web.app import create_app
+
+    console.print(f"[bold]Starting Lifelogger Dashboard[/bold]")
+    console.print(f"  URL: http://{host}:{port}")
+    console.print(f"  API Docs: http://{host}:{port}/docs")
+    console.print()
+
+    if reload:
+        uvicorn.run("lifelogger.web.app:create_app", factory=True, host=host, port=port, reload=True)
+    else:
+        app = create_app()
+        uvicorn.run(app, host=host, port=port)
+
+
+@main.command("import-browser")
+@click.option("--browser", type=click.Choice(["chrome", "firefox", "auto"]), default="auto",
+              help="Browser to import from")
+@click.option("--profile", help="Browser profile name (uses default if not specified)")
+@click.option("--days", default=30, help="Days of history to import")
+@click.option("--classify/--no-classify", default=False, help="Run LLM classification")
+def import_browser(browser: str, profile: str | None, days: int, classify: bool):
+    """Import browser history from Chrome or Firefox."""
+    from datetime import timedelta
+    from lifelogger.sources.browser import BrowserHistorySource
+    from lifelogger.core.database import Database
+
+    async def run():
+        source = BrowserHistorySource()
+        db = Database()
+        await db.connect()
+
+        since = datetime.now() - timedelta(days=days)
+
+        with console.status(f"Importing browser history from last {days} days..."):
+            if browser == "auto":
+                events = await source.import_all_browsers(since=since)
+            elif browser == "chrome":
+                events = await source.import_chrome(profile_name=profile, since=since)
+            else:
+                events = await source.import_firefox(profile_name=profile, since=since)
+
+        if not events:
+            console.print("[yellow]No browser history found.[/yellow]")
+            return
+
+        with console.status(f"Saving {len(events)} events to database..."):
+            await db.insert_activity_events(events)
+
+        console.print(f"[green]Imported {len(events)} browser history events![/green]")
+
+        if classify:
+            from lifelogger.core.ingest import IngestService
+            service = IngestService()
+            with console.status("Running LLM classification..."):
+                count = await service.classify_unclassified_events(max_events=len(events))
+            console.print(f"  Classified: {count} events")
+
+        await db.disconnect()
+
+    asyncio.run(run())
+
+
+@main.command("import-calendar")
+@click.argument("ics_path", type=click.Path(exists=True, path_type=Path))
+@click.option("--days-back", default=30, help="Days back to import")
+@click.option("--days-forward", default=7, help="Days forward to import")
+def import_calendar(ics_path: Path, days_back: int, days_forward: int):
+    """Import calendar events from an ICS file."""
+    from datetime import timedelta
+    from lifelogger.sources.calendar import CalendarSource
+    from lifelogger.core.database import Database
+
+    async def run():
+        source = CalendarSource()
+        db = Database()
+        await db.connect()
+
+        since = datetime.now() - timedelta(days=days_back)
+        until = datetime.now() + timedelta(days=days_forward)
+
+        with console.status(f"Importing calendar events from {ics_path}..."):
+            events = await source.import_ics(ics_path, since=since, until=until)
+
+        if not events:
+            console.print("[yellow]No calendar events found in the specified range.[/yellow]")
+            return
+
+        with console.status(f"Saving {len(events)} events to database..."):
+            await db.insert_activity_events(events)
+
+        console.print(f"[green]Imported {len(events)} calendar events![/green]")
+
+        await db.disconnect()
+
+    asyncio.run(run())
+
+
+@main.command()
+@click.argument("query")
+@click.option("--days", default=7, help="Days to search back")
+@click.option("--limit", default=20, help="Maximum results")
+@click.option("--fuzzy/--no-fuzzy", default=False, help="Use fuzzy matching")
+def search(query: str, days: int, limit: int, fuzzy: bool):
+    """Search activity events using full-text search."""
+    from lifelogger.core.database import Database
+
+    async def run():
+        db = Database()
+        await db.connect()
+
+        with console.status(f"Searching for '{query}'..."):
+            async with db.acquire() as conn:
+                if fuzzy:
+                    # Fuzzy search using trigrams
+                    rows = await conn.fetch(
+                        """
+                        SELECT
+                            id, timestamp, source, app_name, window_title, url,
+                            GREATEST(
+                                similarity(window_title, $1),
+                                similarity(app_name, $1)
+                            ) as relevance
+                        FROM activity_events
+                        WHERE timestamp > NOW() - INTERVAL '%s days'
+                        AND (
+                            similarity(window_title, $1) > 0.3
+                            OR similarity(app_name, $1) > 0.3
+                        )
+                        ORDER BY relevance DESC, timestamp DESC
+                        LIMIT $2
+                        """ % days,
+                        query, limit
+                    )
+                else:
+                    # Full-text search with ILIKE fallback
+                    rows = await conn.fetch(
+                        """
+                        SELECT
+                            id, timestamp, source, app_name, window_title, url,
+                            ts_rank(
+                                to_tsvector('english', coalesce(window_title, '') || ' ' || coalesce(app_name, '')),
+                                plainto_tsquery('english', $1)
+                            ) as relevance
+                        FROM activity_events
+                        WHERE timestamp > NOW() - INTERVAL '%s days'
+                        AND (
+                            window_title ILIKE $2
+                            OR app_name ILIKE $2
+                            OR url ILIKE $2
+                        )
+                        ORDER BY relevance DESC, timestamp DESC
+                        LIMIT $3
+                        """ % days,
+                        query, f"%{query}%", limit
+                    )
+
+        if not rows:
+            console.print(f"[yellow]No results found for '{query}'[/yellow]")
+            return
+
+        table = Table(title=f"Search Results: '{query}'")
+        table.add_column("Time", style="dim")
+        table.add_column("Source", style="cyan")
+        table.add_column("App")
+        table.add_column("Title/URL")
+        table.add_column("Score", justify="right")
+
+        for row in rows:
+            timestamp = row["timestamp"].strftime("%m/%d %H:%M")
+            title = row["window_title"] or row["url"] or "-"
+            if len(title) > 50:
+                title = title[:47] + "..."
+            table.add_row(
+                timestamp,
+                row["source"],
+                row["app_name"] or "-",
+                title,
+                f"{row['relevance']:.2f}"
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Found {len(rows)} results[/dim]")
+
+        await db.disconnect()
+
+    asyncio.run(run())
+
+
+@main.command()
+@click.option("--days", default=90, help="Days of data to retain")
+@click.option("--archive/--no-archive", default=True, help="Archive before deleting")
+@click.option("--dry-run/--execute", default=True, help="Show what would be deleted without actually deleting")
+def cleanup(days: int, archive: bool, dry_run: bool):
+    """Clean up old data from the database."""
+    from datetime import timedelta
+    from lifelogger.core.database import Database
+
+    async def run():
+        db = Database()
+        await db.connect()
+
+        cutoff = datetime.now() - timedelta(days=days)
+
+        async with db.acquire() as conn:
+            # Count events to delete
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM activity_events WHERE timestamp < $1",
+                cutoff
+            )
+
+        if count == 0:
+            console.print(f"[green]No events older than {days} days found.[/green]")
+            return
+
+        console.print(f"Found [bold]{count}[/bold] events older than {cutoff.date()}")
+
+        if dry_run:
+            console.print("[yellow]Dry run - no changes made. Use --execute to actually delete.[/yellow]")
+            return
+
+        if archive:
+            console.print("[dim]Archiving is handled by data_retention.py script[/dim]")
+
+        with console.status("Deleting old events..."):
+            async with db.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM activity_events WHERE timestamp < $1",
+                    cutoff
+                )
+
+        console.print(f"[green]Deleted {count} events![/green]")
+
+        await db.disconnect()
+
+    asyncio.run(run())
+
+
 @main.command()
 def setup():
     """Interactive setup wizard."""
@@ -255,6 +563,8 @@ def setup():
     console.print("   [dim]0 6 * * * cd /path/to/im-watching-you && python -m lifelogger classify[/dim]")
     console.print("   [dim]# Daily digest at 7 AM[/dim]")
     console.print("   [dim]0 7 * * * cd /path/to/im-watching-you && python -m lifelogger digest --send[/dim]")
+    console.print("   [dim]# Weekly digest on Sundays[/dim]")
+    console.print("   [dim]0 10 * * 0 cd /path/to/im-watching-you && python -m lifelogger weekly-digest --send[/dim]")
 
 
 if __name__ == "__main__":
