@@ -38,11 +38,12 @@ class DataSensitivity(Enum):
 
 @dataclass
 class RateLimiter:
-    """Simple rate limiter for API calls."""
+    """Adaptive rate limiter for API calls with burst handling."""
 
     max_requests: int = 20
     window_seconds: int = 60
     _timestamps: deque = field(default_factory=deque)
+    _consecutive_waits: int = 0
 
     async def acquire(self) -> None:
         """Wait until we can make a request within rate limits."""
@@ -56,11 +57,88 @@ class RateLimiter:
         if len(self._timestamps) >= self.max_requests:
             sleep_time = self._timestamps[0] + self.window_seconds - now
             if sleep_time > 0:
+                self._consecutive_waits += 1
                 await asyncio.sleep(sleep_time)
-                # Recursive call to clean up and check again
                 return await self.acquire()
+        else:
+            self._consecutive_waits = 0
 
         self._timestamps.append(now)
+
+    def requests_remaining(self) -> int:
+        """Get number of requests remaining in current window."""
+        now = time.time()
+        while self._timestamps and self._timestamps[0] < now - self.window_seconds:
+            self._timestamps.popleft()
+        return max(0, self.max_requests - len(self._timestamps))
+
+    def seconds_until_reset(self) -> float:
+        """Seconds until oldest request expires from window."""
+        if not self._timestamps:
+            return 0
+        return max(0, self._timestamps[0] + self.window_seconds - time.time())
+
+
+class ClassificationCache:
+    """LRU cache for event classifications to avoid redundant LLM calls.
+
+    Caches based on (app_name, simplified_title) keys.
+    Same app with similar activity patterns get cached classification.
+    """
+
+    def __init__(self, max_size: int = 1000):
+        self._cache: dict[str, EventClassification] = {}
+        self._access_order: deque = deque()
+        self._max_size = max_size
+
+    def _make_key(self, app_name: str | None, window_title: str | None) -> str:
+        """Create cache key from event data."""
+        app = (app_name or "").lower().strip()
+        # Simplify title - keep first 3 words
+        title_words = (window_title or "").split()[:3]
+        title = " ".join(title_words).lower()
+        return f"{app}::{title}"
+
+    def get(self, app_name: str | None, window_title: str | None) -> EventClassification | None:
+        """Get cached classification if available."""
+        key = self._make_key(app_name, window_title)
+        if key in self._cache:
+            # Move to end (most recently used)
+            try:
+                self._access_order.remove(key)
+            except ValueError:
+                pass
+            self._access_order.append(key)
+            return self._cache[key]
+        return None
+
+    def put(
+        self,
+        app_name: str | None,
+        window_title: str | None,
+        classification: EventClassification,
+    ) -> None:
+        """Cache a classification."""
+        key = self._make_key(app_name, window_title)
+
+        # Evict oldest if at capacity
+        while len(self._cache) >= self._max_size and self._access_order:
+            oldest = self._access_order.popleft()
+            self._cache.pop(oldest, None)
+
+        self._cache[key] = classification
+        self._access_order.append(key)
+
+    def stats(self) -> dict[str, int]:
+        """Get cache statistics."""
+        return {
+            "size": len(self._cache),
+            "max_size": self._max_size,
+        }
+
+
+# Global classification cache
+_classification_cache = ClassificationCache()
 
 
 class LLMProvider(ABC):
@@ -516,14 +594,37 @@ class BatchEventClassification(BaseModel):
 async def classify_events_batch(
     llm: HybridLLMService,
     events: list[dict[str, Any]],
-    batch_size: int = 10,
+    batch_size: int = 30,  # LLMs handle large batches well
+    use_cache: bool = True,
 ) -> list[EventClassification]:
-    """Classify multiple events in batches for efficiency."""
-    all_classifications = []
+    """Classify multiple events in batches for efficiency.
+
+    Uses caching to skip events similar to previously classified ones.
+    With 30 events/batch and 20 req/min limit = 600 events/min = 36k/hour.
+    """
+    all_classifications: list[EventClassification | None] = [None] * len(events)
+    events_to_classify: list[tuple[int, dict[str, Any]]] = []  # (original_index, event)
     settings = llm.settings
 
-    for i in range(0, len(events), batch_size):
-        batch = events[i : i + batch_size]
+    # First pass: check cache for each event
+    cache_hits = 0
+    for idx, event in enumerate(events):
+        if use_cache:
+            cached = _classification_cache.get(
+                event.get("app_name"),
+                event.get("window_title"),
+            )
+            if cached:
+                all_classifications[idx] = cached
+                cache_hits += 1
+                continue
+        events_to_classify.append((idx, event))
+
+    # Process uncached events in batches
+    for i in range(0, len(events_to_classify), batch_size):
+        batch_items = events_to_classify[i : i + batch_size]
+        batch = [item[1] for item in batch_items]
+        batch_indices = [item[0] for item in batch_items]
 
         # Determine sensitivity and redact if needed
         max_sensitivity = DataSensitivity.LOW
@@ -581,10 +682,22 @@ Return a JSON object with a "classifications" array containing {len(batch)} clas
                 temperature=0.2,
                 sensitivity=max_sensitivity,
             )
-            all_classifications.extend(result.classifications)
+
+            # Store results and update cache
+            for j, classification in enumerate(result.classifications):
+                orig_idx = batch_indices[j]
+                all_classifications[orig_idx] = classification
+                # Cache the result
+                if use_cache:
+                    _classification_cache.put(
+                        batch[j].get("app_name"),
+                        batch[j].get("window_title"),
+                        classification,
+                    )
         except (ValueError, ValidationError):
             # Fall back to individual classification
-            for event in batch:
+            for j, event in enumerate(batch):
+                orig_idx = batch_indices[j]
                 try:
                     classification = await classify_event(
                         llm,
@@ -594,20 +707,65 @@ Return a JSON object with a "classifications" array containing {len(batch)} clas
                         duration=event.get("duration"),
                         extra_data=event.get("data"),
                     )
-                    all_classifications.append(classification)
-                except Exception:
-                    all_classifications.append(
-                        EventClassification(
-                            event_type="other",
-                            category="Unknown",
-                            subcategory=None,
-                            is_productive=None,
-                            description="Classification failed",
-                            confidence=0.0,
+                    all_classifications[orig_idx] = classification
+                    if use_cache:
+                        _classification_cache.put(
+                            event.get("app_name"),
+                            event.get("window_title"),
+                            classification,
                         )
+                except Exception:
+                    all_classifications[orig_idx] = EventClassification(
+                        event_type="other",
+                        category="Unknown",
+                        subcategory=None,
+                        is_productive=None,
+                        description="Classification failed",
+                        confidence=0.0,
                     )
 
-    return all_classifications
+    # Convert None values to default classification (shouldn't happen but safety)
+    return [
+        c if c is not None else EventClassification(
+            event_type="other",
+            category="Unknown",
+            description="Not classified",
+            confidence=0.0,
+        )
+        for c in all_classifications
+    ]
+
+
+def estimate_classification_time(
+    num_events: int,
+    batch_size: int = 30,
+    rate_limit: int = 20,
+    cache_hit_rate: float = 0.3,
+) -> dict[str, Any]:
+    """Estimate time to classify events with rate limiting.
+
+    Args:
+        num_events: Number of events to classify
+        batch_size: Events per LLM call
+        rate_limit: Requests per minute allowed
+        cache_hit_rate: Expected cache hit ratio (0.0 to 1.0)
+
+    Returns:
+        Dict with timing estimates
+    """
+    events_after_cache = int(num_events * (1 - cache_hit_rate))
+    num_batches = (events_after_cache + batch_size - 1) // batch_size
+    minutes_needed = num_batches / rate_limit
+
+    return {
+        "total_events": num_events,
+        "events_from_cache": num_events - events_after_cache,
+        "events_to_classify": events_after_cache,
+        "num_batches": num_batches,
+        "rate_limit_rpm": rate_limit,
+        "estimated_minutes": round(minutes_needed, 1),
+        "estimated_seconds": round(minutes_needed * 60, 0),
+    }
 
 
 # ============================================================================
