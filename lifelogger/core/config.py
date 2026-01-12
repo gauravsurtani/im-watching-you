@@ -42,9 +42,22 @@ class Settings(BaseSettings):
 
     # OpenRouter (cloud LLM - free tier)
     openrouter_api_key: str = ""  # Get from https://openrouter.ai/keys
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Model Configuration
+    # Preset: "speed" (fastest), "balanced" (recommended), "quality" (best), "minimal"
+    model_preset: Literal["speed", "balanced", "quality", "minimal"] = "balanced"
+
+    # Override specific models (optional, uses preset defaults if empty)
+    # Use model keys from models_config.py: "llama-3.2-3b", "gemma-2-9b", "mistral-small-24b", etc.
+    model_classification: str = ""  # For event/batch classification
+    model_analysis: str = ""  # For transcript analysis
+    model_digest: str = ""  # For digest generation
+    model_general: str = ""  # For other tasks
+
+    # Legacy single-model config (used if no preset/override)
     openrouter_model: str = "meta-llama/llama-3.2-3b-instruct:free"
     openrouter_fallback_model: str = "google/gemma-2-9b-it:free"
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # LLM Provider Strategy
     # "local" = Always use Ollama (maximum privacy)

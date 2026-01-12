@@ -536,6 +536,12 @@ def llm_status():
     """Check LLM provider status and configuration."""
     from lifelogger.core.llm import check_provider_status, OpenRouterProvider
     from lifelogger.core.config import get_settings
+    from lifelogger.core.models_config import (
+        TaskType,
+        get_model_for_task,
+        get_preset,
+        PRESETS,
+    )
 
     async def run():
         settings = get_settings()
@@ -592,10 +598,57 @@ def llm_status():
 
         console.print()
 
+        # Model Configuration
+        console.print("[bold]Model Configuration:[/bold]")
+        preset = get_preset(settings.model_preset)
+        if preset:
+            console.print(f"  Preset: [cyan]{preset.name}[/cyan]")
+            console.print(f"    [dim]{preset.description}[/dim]")
+        else:
+            console.print(f"  Preset: {settings.model_preset}")
+
+        console.print("\n  [bold]Task-Specific Models:[/bold]")
+        task_display = {
+            TaskType.EVENT_CLASSIFICATION: "Classification",
+            TaskType.BATCH_CLASSIFICATION: "Batch Classification",
+            TaskType.TRANSCRIPT_ANALYSIS: "Transcript Analysis",
+            TaskType.DIGEST_GENERATION: "Digest Generation",
+            TaskType.URL_ANALYSIS: "URL Analysis",
+            TaskType.GENERAL: "General",
+        }
+
+        for task_type, display_name in task_display.items():
+            model_spec = get_model_for_task(task_type, preset=settings.model_preset)
+            # Check for overrides
+            override_map = {
+                TaskType.EVENT_CLASSIFICATION: settings.model_classification,
+                TaskType.BATCH_CLASSIFICATION: settings.model_classification,
+                TaskType.TRANSCRIPT_ANALYSIS: settings.model_analysis,
+                TaskType.DIGEST_GENERATION: settings.model_digest,
+                TaskType.URL_ANALYSIS: settings.model_classification,
+                TaskType.GENERAL: settings.model_general,
+            }
+            override = override_map.get(task_type)
+            if override:
+                console.print(f"    {display_name}: [yellow]{override}[/yellow] (override)")
+            else:
+                console.print(f"    {display_name}: {model_spec.name} [{model_spec.speed}]")
+
+        console.print()
+
+        # Available presets
+        console.print("[bold]Available Presets:[/bold]")
+        for name, p in PRESETS.items():
+            marker = " <--" if name == settings.model_preset else ""
+            console.print(f"  {name}: {p.description}{marker}")
+
+        console.print()
+
         # Free models info
-        console.print("[bold]Available Free Models on OpenRouter:[/bold]")
-        for model in OpenRouterProvider.FREE_MODELS[:5]:
+        console.print("[bold]Free OpenRouter Models:[/bold]")
+        for model in OpenRouterProvider.FREE_MODELS[:6]:
             console.print(f"  - {model}")
+        console.print(f"  ... and {len(OpenRouterProvider.FREE_MODELS) - 6} more")
 
         console.print("\n[dim]Get a free API key at: https://openrouter.ai/keys[/dim]")
 

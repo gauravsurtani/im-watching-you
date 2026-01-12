@@ -22,6 +22,7 @@ import aiohttp
 from pydantic import BaseModel, ValidationError
 
 from lifelogger.core.config import Settings, get_settings
+from lifelogger.core.models_config import TaskType, get_model_for_task
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -224,15 +225,26 @@ class OllamaProvider(LLMProvider):
 
 
 class OpenRouterProvider(LLMProvider):
-    """Cloud LLM provider using OpenRouter (supports free models)."""
+    """Cloud LLM provider using OpenRouter (supports free models).
 
-    # Free models available on OpenRouter
+    Supports task-specific model selection via models_config.
+    """
+
+    # Free models available on OpenRouter (updated Jan 2025)
     FREE_MODELS = [
         "meta-llama/llama-3.2-3b-instruct:free",
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
         "google/gemma-2-9b-it:free",
+        "google/gemma-3-12b-it:free",
+        "google/gemma-3-27b-it:free",
         "mistralai/mistral-7b-instruct:free",
-        "nousresearch/nous-capybara-7b:free",
-        "huggingfaceh4/zephyr-7b-beta:free",
+        "mistralai/mistral-small-3.1-24b-instruct:free",
+        "qwen/qwen-2.5-7b-instruct:free",
+        "qwen/qwen2.5-vl-32b-instruct:free",
+        "qwen/qwen2.5-vl-72b-instruct:free",
+        "microsoft/phi-4:free",
+        "deepseek/deepseek-r1:free",
     ]
 
     def __init__(self, settings: Settings):
@@ -242,6 +254,7 @@ class OpenRouterProvider(LLMProvider):
             max_requests=settings.openrouter_rate_limit,
             window_seconds=60,
         )
+        self._default_model = settings.openrouter_model
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -255,6 +268,10 @@ class OpenRouterProvider(LLMProvider):
     def is_available(self) -> bool:
         return bool(self.settings.openrouter_api_key)
 
+    def get_rate_limiter(self) -> RateLimiter:
+        """Get the rate limiter for status checks."""
+        return self._rate_limiter
+
     async def generate(
         self,
         prompt: str,
@@ -262,6 +279,7 @@ class OpenRouterProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 2048,
         json_mode: bool = False,
+        model_id: str | None = None,  # Override model for this request
     ) -> str:
         if not self.is_available():
             raise RuntimeError("OpenRouter API key not configured")
@@ -277,8 +295,11 @@ class OpenRouterProvider(LLMProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        # Use specified model or default
+        model = model_id or self._default_model
+
         payload: dict[str, Any] = {
-            "model": self.settings.openrouter_model,
+            "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -360,6 +381,29 @@ class HybridLLMService:
 
         return self._ollama
 
+    def _get_model_for_task(self, task_type: TaskType | None) -> str | None:
+        """Get the model ID for a specific task type based on settings."""
+        if task_type is None:
+            return None
+
+        # Check for explicit model overrides in settings
+        overrides = {
+            TaskType.EVENT_CLASSIFICATION: self.settings.model_classification,
+            TaskType.BATCH_CLASSIFICATION: self.settings.model_classification,
+            TaskType.TRANSCRIPT_ANALYSIS: self.settings.model_analysis,
+            TaskType.DIGEST_GENERATION: self.settings.model_digest,
+            TaskType.URL_ANALYSIS: self.settings.model_classification,
+            TaskType.GENERAL: self.settings.model_general,
+        }
+
+        override = overrides.get(task_type)
+        if override:
+            return override
+
+        # Use preset-based model selection
+        model_spec = get_model_for_task(task_type, preset=self.settings.model_preset)
+        return model_spec.id
+
     async def generate(
         self,
         prompt: str,
@@ -367,11 +411,30 @@ class HybridLLMService:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         sensitivity: DataSensitivity = DataSensitivity.LOW,
+        task_type: TaskType | None = None,
     ) -> str:
-        """Generate text completion with automatic provider selection."""
+        """Generate text completion with automatic provider selection.
+
+        Args:
+            prompt: The prompt to send to the LLM
+            system: Optional system message
+            temperature: Sampling temperature (0.0-1.0)
+            max_tokens: Maximum tokens to generate
+            sensitivity: Data sensitivity level for routing
+            task_type: Optional task type for model selection (OpenRouter only)
+        """
         provider = self._select_provider(sensitivity)
 
+        # Get task-specific model for OpenRouter
+        model_id = None
+        if isinstance(provider, OpenRouterProvider) and task_type:
+            model_id = self._get_model_for_task(task_type)
+
         try:
+            if isinstance(provider, OpenRouterProvider):
+                return await provider.generate(
+                    prompt, system, temperature, max_tokens, model_id=model_id
+                )
             return await provider.generate(prompt, system, temperature, max_tokens)
         except Exception as e:
             # Fallback logic for cloud_fallback strategy
@@ -382,7 +445,7 @@ class HybridLLMService:
                 and sensitivity not in (DataSensitivity.HIGH, DataSensitivity.CRITICAL)
             ):
                 return await self._openrouter.generate(
-                    prompt, system, temperature, max_tokens
+                    prompt, system, temperature, max_tokens, model_id=model_id
                 )
             raise e
 
@@ -393,9 +456,15 @@ class HybridLLMService:
         temperature: float = 0.3,
         max_tokens: int = 4096,
         sensitivity: DataSensitivity = DataSensitivity.LOW,
+        task_type: TaskType | None = None,
     ) -> dict[str, Any]:
         """Generate structured JSON output."""
         provider = self._select_provider(sensitivity)
+
+        # Get task-specific model for OpenRouter
+        model_id = None
+        if isinstance(provider, OpenRouterProvider) and task_type:
+            model_id = self._get_model_for_task(task_type)
 
         # Append JSON instruction
         json_prompt = f"""{prompt}
@@ -407,9 +476,14 @@ Just the raw JSON object."""
             system = system + "\nAlways respond with valid JSON only."
 
         try:
-            response = await provider.generate(
-                json_prompt, system, temperature, max_tokens, json_mode=True
-            )
+            if isinstance(provider, OpenRouterProvider):
+                response = await provider.generate(
+                    json_prompt, system, temperature, max_tokens, json_mode=True, model_id=model_id
+                )
+            else:
+                response = await provider.generate(
+                    json_prompt, system, temperature, max_tokens, json_mode=True
+                )
         except Exception as e:
             # Fallback
             if (
@@ -419,7 +493,7 @@ Just the raw JSON object."""
                 and sensitivity not in (DataSensitivity.HIGH, DataSensitivity.CRITICAL)
             ):
                 response = await self._openrouter.generate(
-                    json_prompt, system, temperature, max_tokens, json_mode=True
+                    json_prompt, system, temperature, max_tokens, json_mode=True, model_id=model_id
                 )
             else:
                 raise e
@@ -436,6 +510,7 @@ Just the raw JSON object."""
         system: str | None = None,
         temperature: float = 0.3,
         sensitivity: DataSensitivity = DataSensitivity.LOW,
+        task_type: TaskType | None = None,
     ) -> T:
         """Generate output validated against a Pydantic model."""
         schema = response_model.model_json_schema()
@@ -445,7 +520,7 @@ Respond with a JSON object matching this schema:
 {json.dumps(schema, indent=2)}"""
 
         result = await self.generate_json(
-            schema_prompt, system, temperature, sensitivity=sensitivity
+            schema_prompt, system, temperature, sensitivity=sensitivity, task_type=task_type
         )
 
         try:
@@ -577,6 +652,7 @@ async def classify_event(
         system=EVENT_CLASSIFICATION_SYSTEM,
         temperature=0.2,
         sensitivity=sensitivity,
+        task_type=TaskType.EVENT_CLASSIFICATION,
     )
 
 
@@ -681,6 +757,7 @@ Return a JSON object with a "classifications" array containing {len(batch)} clas
                 system=EVENT_CLASSIFICATION_SYSTEM,
                 temperature=0.2,
                 sensitivity=max_sensitivity,
+                task_type=TaskType.BATCH_CLASSIFICATION,
             )
 
             # Store results and update cache
@@ -823,6 +900,7 @@ async def analyze_transcript(llm: HybridLLMService, transcript_text: str) -> Tra
         system=TRANSCRIPT_ANALYSIS_SYSTEM,
         temperature=0.3,
         sensitivity=DataSensitivity.CRITICAL,  # Always local
+        task_type=TaskType.TRANSCRIPT_ANALYSIS,
     )
 
 
@@ -873,6 +951,7 @@ async def analyze_url(
         system="You analyze URLs and web page titles to extract metadata.",
         temperature=0.2,
         sensitivity=sensitivity,
+        task_type=TaskType.URL_ANALYSIS,
     )
 
 
