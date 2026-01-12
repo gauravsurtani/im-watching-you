@@ -1,8 +1,8 @@
 # Lifelogger
 
-**Privacy-first personal "second brain"** - A local-first life-logging system combining ActivityWatch for activity tracking, Whisper.cpp for audio transcription, Ollama for LLM processing, and Syncthing for cross-device sync.
+**Privacy-first personal "second brain"** - A local-first life-logging system combining ActivityWatch for activity tracking, Whisper.cpp for audio transcription, LLM processing (local Ollama or free cloud via OpenRouter), and Syncthing for cross-device sync.
 
-Zero cloud dependencies. Your data never leaves your network.
+**Flexible LLM options**: Run entirely local for maximum privacy, use free cloud models via OpenRouter (no GPU needed), or hybrid mode that routes sensitive data locally while using cloud for classification.
 
 ## Architecture
 
@@ -29,10 +29,13 @@ Zero cloud dependencies. Your data never leaves your network.
 
 - **Cross-platform activity tracking** via ActivityWatch (Mac, Windows, Android)
 - **Audio transcription** with Whisper.cpp (on-device for Android)
-- **AI-powered daily digests** using local LLMs via Ollama
+- **AI-powered daily digests** using LLMs (local Ollama or free OpenRouter cloud)
+- **Hybrid LLM routing** - Cloud for classification, local for sensitive transcripts
 - **Push notifications** via ntfy (self-hosted)
 - **P2P encrypted sync** with Syncthing
 - **Time-series database** with TimescaleDB for efficient queries
+- **Web dashboard** with search, stats, and event browser
+- **Full-text search** with fuzzy matching support
 
 ## Quick Start
 
@@ -51,12 +54,33 @@ docker compose up -d
 
 # Wait for services to be ready
 docker compose ps
-
-# Pull an Ollama model
-docker exec lifelogger-ollama ollama pull qwen2.5:7b
 ```
 
-### 2. Install Python Package
+### 2. Configure LLM (Choose One)
+
+**Option A: OpenRouter Cloud (Free, No GPU)**
+```bash
+# Get your free API key at https://openrouter.ai/keys
+# Add to .env:
+LIFELOGGER_OPENROUTER_API_KEY=your_key_here
+LIFELOGGER_LLM_PROVIDER=cloud
+```
+
+**Option B: Local Ollama (Maximum Privacy, Requires GPU)**
+```bash
+docker exec lifelogger-ollama ollama pull qwen2.5:7b
+# In .env:
+LIFELOGGER_LLM_PROVIDER=local
+```
+
+**Option C: Hybrid (Best of Both)**
+```bash
+# Set up both, then in .env:
+LIFELOGGER_LLM_PROVIDER=hybrid
+# Cloud handles classification, local handles sensitive transcripts
+```
+
+### 3. Install Python Package
 
 ```bash
 # From repository root

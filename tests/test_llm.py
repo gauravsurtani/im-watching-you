@@ -1,4 +1,4 @@
-"""Tests for LLM service."""
+"""Tests for hybrid LLM service."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,10 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from lifelogger.core.llm import (
+    DataSensitivity,
     EventClassification,
+    HybridLLMService,
     LLMService,
+    OllamaProvider,
+    OpenRouterProvider,
     TranscriptAnalysis,
     classify_event,
+    check_provider_status,
 )
 
 
@@ -28,6 +33,17 @@ class TestEventClassification:
         )
         assert classification.event_type == "browser"
         assert classification.confidence == 0.9
+
+    def test_minimal_classification(self):
+        """Test classification with only required fields."""
+        classification = EventClassification(
+            event_type="other",
+            category="Unknown",
+            description="Unknown activity",
+            confidence=0.0,
+        )
+        assert classification.subcategory is None
+        assert classification.is_productive is None
 
 
 class TestTranscriptAnalysis:
@@ -50,51 +66,128 @@ class TestTranscriptAnalysis:
         assert "Send report by Friday" in analysis.action_items
 
 
-class TestLLMService:
-    """Test LLMService class."""
+class TestDataSensitivity:
+    """Test DataSensitivity enum."""
+
+    def test_sensitivity_levels(self):
+        """Test sensitivity levels exist."""
+        assert DataSensitivity.LOW.value == "low"
+        assert DataSensitivity.MEDIUM.value == "medium"
+        assert DataSensitivity.HIGH.value == "high"
+        assert DataSensitivity.CRITICAL.value == "critical"
+
+
+class TestHybridLLMService:
+    """Test HybridLLMService class."""
 
     @pytest.fixture
-    def llm_service(self):
-        """Create LLM service for testing."""
+    def settings(self):
+        """Create settings for testing."""
         from lifelogger.core.config import Settings
-        settings = Settings(ollama_host="localhost", ollama_port=11434)
-        return LLMService(settings)
+        return Settings(
+            ollama_host="localhost",
+            ollama_port=11434,
+            openrouter_api_key="test_key",
+            llm_provider="hybrid",
+        )
 
-    @pytest.mark.asyncio
-    async def test_generate_json_valid_response(self, llm_service):
-        """Test generate_json with valid response."""
-        mock_response = {
-            "response": '{"event_type": "browser", "category": "Work"}'
-        }
+    @pytest.fixture
+    def llm_service(self, settings):
+        """Create LLM service for testing."""
+        return HybridLLMService(settings)
 
-        with patch("aiohttp.ClientSession") as mock_session_class:
-            mock_session = AsyncMock()
-            mock_session_class.return_value.__aenter__.return_value = mock_session
+    def test_backward_compatibility_alias(self):
+        """Test that LLMService is an alias for HybridLLMService."""
+        assert LLMService is HybridLLMService
 
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            mock_resp.json = AsyncMock(return_value=mock_response)
-            mock_session.post.return_value.__aenter__.return_value = mock_resp
+    def test_provider_selection_local(self, settings):
+        """Test provider selection for local strategy."""
+        settings.llm_provider = "local"
+        service = HybridLLMService(settings)
+        provider = service._select_provider(DataSensitivity.LOW)
+        assert isinstance(provider, OllamaProvider)
 
-            result = await llm_service.generate_json("Test prompt")
+    def test_provider_selection_cloud(self, settings):
+        """Test provider selection for cloud strategy."""
+        settings.llm_provider = "cloud"
+        service = HybridLLMService(settings)
+        provider = service._select_provider(DataSensitivity.LOW)
+        assert isinstance(provider, OpenRouterProvider)
 
-            assert result["event_type"] == "browser"
-            assert result["category"] == "Work"
+    def test_provider_selection_hybrid_low_sensitivity(self, settings):
+        """Test hybrid provider selection routes low sensitivity to cloud."""
+        settings.llm_provider = "hybrid"
+        service = HybridLLMService(settings)
+        provider = service._select_provider(DataSensitivity.LOW)
+        assert isinstance(provider, OpenRouterProvider)
 
-    @pytest.mark.asyncio
-    async def test_generate_error_handling(self, llm_service):
-        """Test error handling on API failure."""
-        with patch("aiohttp.ClientSession") as mock_session_class:
-            mock_session = AsyncMock()
-            mock_session_class.return_value.__aenter__.return_value = mock_session
+    def test_provider_selection_hybrid_high_sensitivity(self, settings):
+        """Test hybrid provider selection routes high sensitivity to local."""
+        settings.llm_provider = "hybrid"
+        service = HybridLLMService(settings)
+        provider = service._select_provider(DataSensitivity.HIGH)
+        assert isinstance(provider, OllamaProvider)
 
-            mock_resp = AsyncMock()
-            mock_resp.status = 500
-            mock_resp.text = AsyncMock(return_value="Internal Server Error")
-            mock_session.post.return_value.__aenter__.return_value = mock_resp
+    def test_provider_selection_hybrid_critical_sensitivity(self, settings):
+        """Test hybrid provider selection routes critical sensitivity to local."""
+        settings.llm_provider = "hybrid"
+        service = HybridLLMService(settings)
+        provider = service._select_provider(DataSensitivity.CRITICAL)
+        assert isinstance(provider, OllamaProvider)
 
-            with pytest.raises(RuntimeError, match="Ollama API error"):
-                await llm_service.generate("Test prompt")
+    def test_provider_fallback_no_api_key(self):
+        """Test fallback to Ollama when no API key."""
+        from lifelogger.core.config import Settings
+        settings = Settings(
+            ollama_host="localhost",
+            openrouter_api_key="",  # No API key
+            llm_provider="cloud",
+        )
+        service = HybridLLMService(settings)
+        provider = service._select_provider(DataSensitivity.LOW)
+        # Should fall back to Ollama since OpenRouter isn't available
+        assert isinstance(provider, OllamaProvider)
+
+
+class TestOllamaProvider:
+    """Test OllamaProvider class."""
+
+    def test_is_available(self):
+        """Test provider availability check."""
+        from lifelogger.core.config import Settings
+        settings = Settings(ollama_host="localhost")
+        provider = OllamaProvider(settings)
+        assert provider.is_available() is True
+
+    def test_is_not_available(self):
+        """Test provider unavailability."""
+        from lifelogger.core.config import Settings
+        settings = Settings(ollama_host="")
+        provider = OllamaProvider(settings)
+        assert provider.is_available() is False
+
+
+class TestOpenRouterProvider:
+    """Test OpenRouterProvider class."""
+
+    def test_is_available_with_key(self):
+        """Test provider available with API key."""
+        from lifelogger.core.config import Settings
+        settings = Settings(openrouter_api_key="test_key")
+        provider = OpenRouterProvider(settings)
+        assert provider.is_available() is True
+
+    def test_is_not_available_without_key(self):
+        """Test provider unavailable without API key."""
+        from lifelogger.core.config import Settings
+        settings = Settings(openrouter_api_key="")
+        provider = OpenRouterProvider(settings)
+        assert provider.is_available() is False
+
+    def test_free_models_list(self):
+        """Test free models list is populated."""
+        assert len(OpenRouterProvider.FREE_MODELS) > 0
+        assert "meta-llama/llama-3.2-3b-instruct:free" in OpenRouterProvider.FREE_MODELS
 
 
 class TestClassifyEvent:
@@ -103,7 +196,10 @@ class TestClassifyEvent:
     @pytest.mark.asyncio
     async def test_classify_event_structure(self):
         """Test that classify_event returns proper structure."""
-        mock_llm = AsyncMock()
+        from lifelogger.core.config import Settings
+
+        mock_llm = MagicMock()
+        mock_llm.settings = Settings(llm_provider="local")
         mock_llm.generate_structured = AsyncMock(return_value=EventClassification(
             event_type="development",
             category="Work",
@@ -122,3 +218,64 @@ class TestClassifyEvent:
         assert result.event_type == "development"
         assert result.is_productive is True
         mock_llm.generate_structured.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_classify_event_with_url(self):
+        """Test classification with URL."""
+        from lifelogger.core.config import Settings
+
+        mock_llm = MagicMock()
+        mock_llm.settings = Settings(llm_provider="local")
+        mock_llm.generate_structured = AsyncMock(return_value=EventClassification(
+            event_type="browser",
+            category="Work",
+            subcategory="Documentation",
+            is_productive=True,
+            description="Reading docs",
+            confidence=0.9,
+        ))
+
+        result = await classify_event(
+            mock_llm,
+            app_name="Chrome",
+            window_title="Python Docs",
+            url="https://docs.python.org/3/",
+        )
+
+        assert result.event_type == "browser"
+
+
+class TestPrivacyRedaction:
+    """Test privacy-aware redaction."""
+
+    def test_url_redaction(self):
+        """Test URL is redacted to domain for cloud."""
+        from lifelogger.core.config import Settings
+        from lifelogger.core.llm import _redact_sensitive_for_cloud
+
+        settings = Settings(privacy_local_urls=True)
+        app, title, url, sensitivity = _redact_sensitive_for_cloud(
+            "Chrome",
+            "My Secret Doc",
+            "https://example.com/private/doc.pdf",
+            settings,
+        )
+
+        assert url == "example.com"  # Only domain kept
+        assert sensitivity == DataSensitivity.HIGH
+
+    def test_no_redaction_when_disabled(self):
+        """Test no redaction when privacy settings disabled."""
+        from lifelogger.core.config import Settings
+        from lifelogger.core.llm import _redact_sensitive_for_cloud
+
+        settings = Settings(privacy_local_urls=False, privacy_local_window_titles=False)
+        app, title, url, sensitivity = _redact_sensitive_for_cloud(
+            "Chrome",
+            "My Secret Doc",
+            "https://example.com/private/doc.pdf",
+            settings,
+        )
+
+        assert url == "https://example.com/private/doc.pdf"  # Full URL kept
+        assert sensitivity == DataSensitivity.LOW

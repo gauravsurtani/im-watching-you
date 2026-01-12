@@ -531,6 +531,84 @@ def cleanup(days: int, archive: bool, dry_run: bool):
     asyncio.run(run())
 
 
+@main.command("llm-status")
+def llm_status():
+    """Check LLM provider status and configuration."""
+    from lifelogger.core.llm import check_provider_status, OpenRouterProvider
+    from lifelogger.core.config import get_settings
+
+    async def run():
+        settings = get_settings()
+        console.print("[bold]LLM Provider Status[/bold]\n")
+
+        with console.status("Checking providers..."):
+            status = await check_provider_status(settings)
+
+        # Strategy
+        strategy_colors = {
+            "local": "green",
+            "cloud": "cyan",
+            "hybrid": "yellow",
+            "cloud_fallback": "magenta",
+        }
+        strategy = status["strategy"]
+        color = strategy_colors.get(strategy, "white")
+        console.print(f"Strategy: [{color}]{strategy}[/{color}]")
+
+        strategy_descriptions = {
+            "local": "All processing done locally via Ollama (maximum privacy)",
+            "cloud": "All processing via OpenRouter cloud (no GPU needed)",
+            "hybrid": "Cloud for classification, local for sensitive data",
+            "cloud_fallback": "Try local first, fall back to cloud on failure",
+        }
+        console.print(f"  [dim]{strategy_descriptions.get(strategy, '')}[/dim]\n")
+
+        # Providers
+        providers = status["providers"]
+
+        # Ollama
+        ollama = providers.get("ollama", {})
+        if ollama.get("available"):
+            console.print("[green]Ollama:[/green] Available")
+            console.print(f"  URL: {ollama.get('url')}")
+            console.print(f"  Model: {ollama.get('model')}")
+            models = ollama.get("installed_models", [])
+            if models:
+                console.print(f"  Installed: {', '.join(models[:5])}" + ("..." if len(models) > 5 else ""))
+        else:
+            console.print(f"[red]Ollama:[/red] Not available - {ollama.get('error', 'Unknown error')}")
+
+        console.print()
+
+        # OpenRouter
+        openrouter = providers.get("openrouter", {})
+        if openrouter.get("available"):
+            console.print("[green]OpenRouter:[/green] Available")
+            console.print(f"  Model: {openrouter.get('model')}")
+            console.print(f"  Fallback: {openrouter.get('fallback_model')}")
+            console.print(f"  Rate limit: {openrouter.get('rate_limit')} req/min")
+        else:
+            console.print(f"[yellow]OpenRouter:[/yellow] Not available - {openrouter.get('error', 'Unknown error')}")
+
+        console.print()
+
+        # Free models info
+        console.print("[bold]Available Free Models on OpenRouter:[/bold]")
+        for model in OpenRouterProvider.FREE_MODELS[:5]:
+            console.print(f"  - {model}")
+
+        console.print("\n[dim]Get a free API key at: https://openrouter.ai/keys[/dim]")
+
+        # Privacy settings
+        console.print("\n[bold]Privacy Settings:[/bold]")
+        console.print(f"  Transcripts local only: {'Yes' if settings.privacy_local_transcripts else 'No'}")
+        console.print(f"  URLs local only: {'Yes' if settings.privacy_local_urls else 'No'}")
+        console.print(f"  Window titles local only: {'Yes' if settings.privacy_local_window_titles else 'No'}")
+        console.print(f"  Digests local only: {'Yes' if settings.privacy_local_digests else 'No'}")
+
+    asyncio.run(run())
+
+
 @main.command()
 def setup():
     """Interactive setup wizard."""
@@ -542,8 +620,20 @@ def setup():
     console.print("2. Wait for services to be healthy:")
     console.print("   [dim]docker compose ps[/dim]\n")
 
-    console.print("3. Pull an Ollama model:")
-    console.print("   [dim]docker exec lifelogger-ollama ollama pull qwen2.5:7b[/dim]\n")
+    console.print("3. Configure LLM (choose one):")
+    console.print("   [cyan]Option A: OpenRouter (Free, no GPU needed)[/cyan]")
+    console.print("   - Get free API key: https://openrouter.ai/keys")
+    console.print("   - Add to .env: LIFELOGGER_OPENROUTER_API_KEY=your_key")
+    console.print("   - Set: LIFELOGGER_LLM_PROVIDER=cloud")
+    console.print()
+    console.print("   [green]Option B: Ollama (Local, requires GPU)[/green]")
+    console.print("   [dim]docker exec lifelogger-ollama ollama pull qwen2.5:7b[/dim]")
+    console.print("   - Set: LIFELOGGER_LLM_PROVIDER=local")
+    console.print()
+    console.print("   [yellow]Option C: Hybrid (Best of both)[/yellow]")
+    console.print("   - Set up both Ollama and OpenRouter")
+    console.print("   - Set: LIFELOGGER_LLM_PROVIDER=hybrid")
+    console.print("   - Cloud handles classification, local handles sensitive data\n")
 
     console.print("4. Set up Syncthing:")
     console.print("   - Open http://localhost:8384")

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
         """PostgreSQL connection URL."""
         return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
-    # Ollama
+    # Ollama (local LLM)
     ollama_host: str = "localhost"
     ollama_port: int = 11434
     ollama_model: str = "qwen2.5:7b"
@@ -39,6 +39,29 @@ class Settings(BaseSettings):
     def ollama_url(self) -> str:
         """Ollama API base URL."""
         return f"http://{self.ollama_host}:{self.ollama_port}"
+
+    # OpenRouter (cloud LLM - free tier)
+    openrouter_api_key: str = ""  # Get from https://openrouter.ai/keys
+    openrouter_model: str = "meta-llama/llama-3.2-3b-instruct:free"
+    openrouter_fallback_model: str = "google/gemma-2-9b-it:free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # LLM Provider Strategy
+    # "local" = Always use Ollama (maximum privacy)
+    # "cloud" = Always use OpenRouter (no local GPU needed)
+    # "hybrid" = Use cloud for non-sensitive, local for sensitive data
+    # "cloud_fallback" = Try local first, fall back to cloud
+    llm_provider: Literal["local", "cloud", "hybrid", "cloud_fallback"] = "hybrid"
+
+    # Privacy settings for hybrid mode
+    # When true, these data types are processed locally only
+    privacy_local_transcripts: bool = True  # Audio transcripts contain conversations
+    privacy_local_urls: bool = True  # Full URLs may be sensitive
+    privacy_local_window_titles: bool = False  # Window titles for classification
+    privacy_local_digests: bool = False  # Daily digests (can redact before cloud)
+
+    # Rate limiting for free tier (requests per minute)
+    openrouter_rate_limit: int = 20  # Free tier is ~20 RPM
 
     # Syncthing paths
     sync_base_path: Path = Field(default=Path.home() / "Syncthing" / "lifelogger")
