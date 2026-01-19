@@ -1,0 +1,30 @@
+[Unit]
+Description=Lifelogger Background Worker
+Documentation=https://github.com/gauravsurtani/im-watching-you
+After=network.target postgresql.service docker.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=lifelogger
+Group=lifelogger
+WorkingDirectory=/home/user/im-watching-you
+EnvironmentFile=/home/user/im-watching-you/.env
+ExecStart=/usr/bin/python -m lifelogger.worker
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lifelogger-worker
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/user/im-watching-you/data /var/log/lifelogger
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

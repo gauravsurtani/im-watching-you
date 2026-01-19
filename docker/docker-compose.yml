@@ -82,9 +82,73 @@ services:
       - PUID=1000
       - PGID=1000
 
+  # Whisper.cpp for audio transcription
+  whisper:
+    image: ghcr.io/ggerganov/whisper.cpp:main
+    container_name: lifelogger-whisper
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8178:8080"
+    volumes:
+      - whisper_models:/models
+      - ${SYNC_DATA_PATH:-~/Syncthing/lifelogger}/audio:/audio:ro
+    command: ["--model", "/models/ggml-base.en.bin", "--host", "0.0.0.0", "--port", "8080"]
+    # To download model: docker exec lifelogger-whisper /bin/bash -c "cd /models && wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # CPU-only alternative (comment out deploy section above):
+    # command: ["--model", "/models/ggml-tiny.en.bin", "--host", "0.0.0.0", "--port", "8080"]
+
+  # Lifelogger Web Dashboard
+  lifelogger-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: lifelogger-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - LIFELOGGER_DB_HOST=timescaledb
+      - LIFELOGGER_OLLAMA_HOST=ollama
+      - LIFELOGGER_NTFY_SERVER=http://ntfy:80
+    env_file:
+      - ../.env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Lifelogger Background Worker
+  lifelogger-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: lifelogger-worker
+    restart: unless-stopped
+    command: ["python", "-m", "lifelogger.worker"]
+    environment:
+      - LIFELOGGER_DB_HOST=timescaledb
+      - LIFELOGGER_OLLAMA_HOST=ollama
+    env_file:
+      - ../.env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
 volumes:
   timescaledb_data:
   ollama_data:
   ntfy_cache:
   ntfy_data:
   syncthing_config:
+  whisper_models:

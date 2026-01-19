@@ -307,6 +307,102 @@ def create_app() -> FastAPI:
 
         return [{"source": r["source"], "count": r["count"]} for r in rows]
 
+    @app.get("/health")
+    async def health_check():
+        """Health check endpoint for container orchestration."""
+        health = {
+            "status": "healthy",
+            "database": False,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Check database
+        if db:
+            try:
+                async with db.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                health["database"] = True
+            except Exception as e:
+                health["status"] = "degraded"
+                health["database_error"] = str(e)
+
+        if not health["database"]:
+            health["status"] = "unhealthy"
+
+        return health
+
+    @app.get("/api/productivity/summary")
+    async def productivity_summary(days: int = Query(default=7, ge=1, le=90)):
+        """Get productivity summary to help optimize your time.
+
+        Returns insights about productive vs unproductive time across categories.
+        """
+        if not db:
+            raise HTTPException(status_code=503, detail="Database not connected")
+
+        async with db.acquire() as conn:
+            # Get productivity breakdown
+            rows = await conn.fetch(
+                """
+                SELECT
+                    classification->>'category' as category,
+                    classification->>'is_productive' as is_productive,
+                    SUM(duration) / 3600.0 as hours,
+                    COUNT(*) as event_count
+                FROM activity_events
+                WHERE timestamp > NOW() - make_interval(days => $1)
+                  AND classification IS NOT NULL
+                GROUP BY
+                    classification->>'category',
+                    classification->>'is_productive'
+                ORDER BY hours DESC
+                """,
+                days,
+            )
+
+            summary = {
+                "period_days": days,
+                "categories": {},
+                "total_productive_hours": 0,
+                "total_unproductive_hours": 0,
+                "total_neutral_hours": 0,
+            }
+
+            for row in rows:
+                cat = row["category"] or "Unknown"
+                if cat not in summary["categories"]:
+                    summary["categories"][cat] = {
+                        "productive_hours": 0,
+                        "unproductive_hours": 0,
+                        "neutral_hours": 0,
+                    }
+
+                hours = float(row["hours"] or 0)
+                if row["is_productive"] == "true":
+                    summary["categories"][cat]["productive_hours"] += hours
+                    summary["total_productive_hours"] += hours
+                elif row["is_productive"] == "false":
+                    summary["categories"][cat]["unproductive_hours"] += hours
+                    summary["total_unproductive_hours"] += hours
+                else:
+                    summary["categories"][cat]["neutral_hours"] += hours
+                    summary["total_neutral_hours"] += hours
+
+            # Calculate productivity score
+            total_tracked = (
+                summary["total_productive_hours"]
+                + summary["total_unproductive_hours"]
+                + summary["total_neutral_hours"]
+            )
+            if total_tracked > 0:
+                summary["productivity_score"] = round(
+                    (summary["total_productive_hours"] / total_tracked) * 100, 1
+                )
+            else:
+                summary["productivity_score"] = 0
+
+            return summary
+
     return app
 
 

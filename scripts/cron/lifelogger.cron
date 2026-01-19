@@ -1,0 +1,45 @@
+# Lifelogger Cron Jobs
+# Install with: crontab /path/to/lifelogger.cron
+# Or add to existing: crontab -e
+
+# Environment setup (adjust paths as needed)
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+LIFELOGGER_ENV=/home/user/im-watching-you/.env
+
+# ============================================================================
+# DATA INGESTION - Every 15 minutes
+# ============================================================================
+# Import new data from Syncthing folders and classify
+*/15 * * * * cd /home/user/im-watching-you && source $LIFELOGGER_ENV && lifelogger ingest --classify >> /var/log/lifelogger/ingest.log 2>&1
+
+# ============================================================================
+# CLASSIFICATION CATCH-UP - Every hour
+# ============================================================================
+# Classify any events that were ingested without classification
+0 * * * * cd /home/user/im-watching-you && source $LIFELOGGER_ENV && lifelogger classify --limit 500 >> /var/log/lifelogger/classify.log 2>&1
+
+# ============================================================================
+# DAILY DIGEST - Every morning at 7:00 AM
+# ============================================================================
+0 7 * * * cd /home/user/im-watching-you && source $LIFELOGGER_ENV && lifelogger digest --send >> /var/log/lifelogger/digest.log 2>&1
+
+# ============================================================================
+# WEEKLY DIGEST - Every Monday at 8:00 AM
+# ============================================================================
+0 8 * * 1 cd /home/user/im-watching-you && source $LIFELOGGER_ENV && lifelogger weekly-digest --send >> /var/log/lifelogger/weekly.log 2>&1
+
+# ============================================================================
+# DATA CLEANUP - Daily at 3:00 AM
+# ============================================================================
+0 3 * * * cd /home/user/im-watching-you && source $LIFELOGGER_ENV && lifelogger cleanup >> /var/log/lifelogger/cleanup.log 2>&1
+
+# ============================================================================
+# BROWSER HISTORY IMPORT - Every 6 hours
+# ============================================================================
+0 */6 * * * cd /home/user/im-watching-you && source $LIFELOGGER_ENV && lifelogger import-browser --days 1 >> /var/log/lifelogger/browser.log 2>&1
+
+# ============================================================================
+# LOG ROTATION - Weekly
+# ============================================================================
+0 0 * * 0 find /var/log/lifelogger -name "*.log" -mtime +30 -delete
