@@ -10,7 +10,7 @@ User=lifelogger
 Group=lifelogger
 WorkingDirectory=/home/user/im-watching-you
 EnvironmentFile=/home/user/im-watching-you/.env
-ExecStart=/usr/bin/python -m uvicorn lifelogger.web.app:app --host 0.0.0.0 --port 8000
+ExecStart=/usr/bin/python -m uvicorn lifelogger.web.app:create_app --factory --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 

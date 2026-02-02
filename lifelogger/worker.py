@@ -85,7 +85,7 @@ class LifeloggerWorker:
         if self.llm:
             await self.llm.close()
         if self.db:
-            await self.db.close()
+            await self.db.disconnect()
 
         logger.info("Worker stopped")
 
@@ -176,7 +176,7 @@ class LifeloggerWorker:
             ORDER BY timestamp DESC
             LIMIT $1
         """
-        async with self.db._pool.acquire() as conn:
+        async with self.db.acquire() as conn:
             rows = await conn.fetch(query, limit)
             return [dict(row) for row in rows]
 
@@ -191,7 +191,7 @@ class LifeloggerWorker:
             SET classification = $1
             WHERE id = $2 AND timestamp = $3
         """
-        async with self.db._pool.acquire() as conn:
+        async with self.db.acquire() as conn:
             await conn.execute(query, json.dumps(classification), event_id, timestamp)
 
     async def _health_check_loop(self):
@@ -201,7 +201,7 @@ class LifeloggerWorker:
         while not self._shutdown:
             try:
                 # Check database
-                async with self.db._pool.acquire() as conn:
+                async with self.db.acquire() as conn:
                     await conn.fetchval("SELECT 1")
                     db_ok = True
             except Exception:
@@ -272,7 +272,7 @@ class LifeloggerWorker:
             WHERE timestamp > NOW() - INTERVAL '1 hour'
         """
         try:
-            async with self.db._pool.acquire() as conn:
+            async with self.db.acquire() as conn:
                 row = await conn.fetchrow(query)
                 if row and row["total_events"] > 0:
                     return {

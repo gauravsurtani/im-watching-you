@@ -340,7 +340,7 @@ def import_browser(browser: str, profile: str | None, days: int, classify: bool)
             return
 
         with console.status(f"Saving {len(events)} events to database..."):
-            await db.insert_activity_events(events)
+            await db.insert_activity_events_batch(events)
 
         console.print(f"[green]Imported {len(events)} browser history events![/green]")
 
@@ -382,7 +382,7 @@ def import_calendar(ics_path: Path, days_back: int, days_forward: int):
             return
 
         with console.status(f"Saving {len(events)} events to database..."):
-            await db.insert_activity_events(events)
+            await db.insert_activity_events_batch(events)
 
         console.print(f"[green]Imported {len(events)} calendar events![/green]")
 
