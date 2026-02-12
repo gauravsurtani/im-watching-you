@@ -139,6 +139,58 @@ crontab -e
 0 7 * * * cd /path/to/im-watching-you && python -m lifelogger digest --send
 ```
 
+## Claude Desktop Integration (MCP)
+
+Connect Lifelogger to Claude Desktop and ask questions about your life:
+
+- *"What was I working on last Tuesday?"*
+- *"How much time did I spend coding this week?"*
+- *"When did I last discuss the budget?"*
+- *"Am I more productive in mornings or afternoons?"*
+
+### Setup
+
+1. **Start the MCP server** (to test):
+   ```bash
+   lifelogger mcp-server
+   ```
+
+2. **Add to Claude Desktop config** (`~/.config/claude/claude_desktop_config.json` on Linux/Mac, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+   ```json
+   {
+     "mcpServers": {
+       "lifelogger": {
+         "command": "lifelogger-mcp",
+         "env": {
+           "LIFELOGGER_DB_HOST": "localhost",
+           "LIFELOGGER_DB_PORT": "5432",
+           "LIFELOGGER_DB_NAME": "lifelogger",
+           "LIFELOGGER_DB_USER": "lifelogger",
+           "LIFELOGGER_DB_PASSWORD": "your_password"
+         }
+       }
+     }
+   }
+   ```
+
+3. **Restart Claude Desktop** - you'll see "lifelogger" in the MCP tools list
+
+### Available Tools (What Claude Can Do)
+
+| Tool | What It Does |
+|------|--------------|
+| `search_activities` | Search through app usage, websites, window titles |
+| `get_daily_stats` | Get stats for any day (hours, top apps, productivity) |
+| `get_productivity_summary` | Productivity metrics over any time period |
+| `get_recent_activities` | What you've been doing recently |
+| `search_transcripts` | Search through conversation transcripts |
+| `get_app_usage` | Detailed usage stats for any app |
+| `compare_periods` | Compare this week vs last week, etc. |
+| `get_context_around_time` | Activities before/after a specific moment |
+| `get_category_breakdown` | Time by category (Work, Entertainment, etc.) |
+
+All data stays local - Claude queries your MCP server, which queries your local database.
+
 ## CLI Commands
 
 ```bash
@@ -159,6 +211,9 @@ lifelogger devices
 
 # Send test notification
 lifelogger notify "Test message" -t "Test Title"
+
+# Start MCP server for Claude Desktop
+lifelogger mcp-server
 
 # Interactive setup guide
 lifelogger setup
@@ -269,10 +324,13 @@ LIFELOGGER_NOTIFICATION_CHANNELS='["ntfy://localhost/alerts", "tgram://bot_token
 
 ## Privacy & Security
 
-- **All processing is local** - no cloud APIs
+- **Local-first architecture** - everything runs on your hardware
+- **Hybrid LLM routing** - sensitive data (transcripts, URLs) stays local even when using cloud classification
 - **Syncthing uses TLS encryption** for device-to-device sync
 - **Database is localhost-only** by default
 - **Audio files auto-delete** after configurable retention period
+- **MCP integration is local** - Claude queries your local server, data never leaves your machine
+- **Configurable privacy settings** - control what goes to cloud vs stays local
 
 ## License
 

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lifelogger": {
+      "command": "lifelogger-mcp",
+      "env": {
+        "LIFELOGGER_DB_HOST": "localhost",
+        "LIFELOGGER_DB_PORT": "5432",
+        "LIFELOGGER_DB_NAME": "lifelogger",
+        "LIFELOGGER_DB_USER": "lifelogger",
+        "LIFELOGGER_DB_PASSWORD": "your_password_here"
+      }
+    }
+  }
+}

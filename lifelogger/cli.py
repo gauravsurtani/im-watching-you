@@ -709,6 +709,26 @@ def setup():
     console.print("   [dim]# Weekly digest on Sundays[/dim]")
     console.print("   [dim]0 10 * * 0 cd /path/to/im-watching-you && python -m lifelogger weekly-digest --send[/dim]")
 
+    console.print("\n7. [Optional] Connect to Claude Desktop:")
+    console.print("   - Run: lifelogger mcp-server (to test)")
+    console.print("   - Add to Claude Desktop config (see README)")
+    console.print("   - Ask Claude: 'What was I working on yesterday?'")
+
+
+@main.command("mcp-server")
+def mcp_server():
+    """Start the MCP server for Claude Desktop integration.
+
+    This allows Claude to query your activity data directly.
+    Add this server to your Claude Desktop configuration to enable
+    questions like 'What was I working on last week?'
+    """
+    from lifelogger.mcp.server import main as run_mcp
+    console.print("[bold]Starting Lifelogger MCP Server...[/bold]")
+    console.print("Claude Desktop can now access your activity data.")
+    console.print("Press Ctrl+C to stop.\n")
+    run_mcp()
+
 
 if __name__ == "__main__":
     main()
