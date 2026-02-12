@@ -730,5 +730,183 @@ def mcp_server():
     run_mcp()
 
 
+@main.command()
+def health():
+    """Run comprehensive system health check.
+
+    Checks all components: database, LLM providers, Syncthing,
+    ActivityWatch data. Shows what's working and what needs fixing.
+    """
+    from lifelogger.core.diagnostics import (
+        run_full_health_check,
+        get_troubleshooting_steps,
+        HealthStatus,
+    )
+
+    async def run():
+        console.print("[bold]Lifelogger System Health Check[/bold]\n")
+
+        with console.status("Checking all components..."):
+            health_report = await run_full_health_check()
+
+        # Overall status
+        status_colors = {
+            HealthStatus.HEALTHY: "green",
+            HealthStatus.DEGRADED: "yellow",
+            HealthStatus.UNHEALTHY: "red",
+            HealthStatus.UNKNOWN: "dim",
+        }
+        status_icons = {
+            HealthStatus.HEALTHY: "✓",
+            HealthStatus.DEGRADED: "⚠",
+            HealthStatus.UNHEALTHY: "✗",
+            HealthStatus.UNKNOWN: "?",
+        }
+
+        color = status_colors[health_report.status]
+        icon = status_icons[health_report.status]
+        console.print(f"Overall Status: [{color}]{icon} {health_report.status.value.upper()}[/{color}]\n")
+
+        # Component details
+        console.print("[bold]Components:[/bold]")
+        for component in health_report.components:
+            c_color = status_colors[component.status]
+            c_icon = status_icons[component.status]
+            console.print(f"  [{c_color}]{c_icon}[/{c_color}] {component.name}: {component.message}")
+
+            if component.details:
+                for key, value in component.details.items():
+                    if value is not None:
+                        console.print(f"      [dim]{key}: {value}[/dim]")
+
+        # Troubleshooting steps
+        steps = get_troubleshooting_steps(health_report)
+        if steps:
+            console.print("\n[bold yellow]Suggested Fixes:[/bold yellow]")
+            for i, step in enumerate(steps, 1):
+                console.print(f"  {i}. {step}")
+
+        # Quick tips
+        if health_report.status == HealthStatus.HEALTHY:
+            console.print("\n[green]All systems operational![/green]")
+        else:
+            console.print("\n[dim]Run 'lifelogger health' again after making fixes.[/dim]")
+
+    asyncio.run(run())
+
+
+@main.command()
+@click.option("--app", "-a", required=True, help="App name (e.g., 'VS Code', 'Chrome')")
+@click.option("--title", "-t", default="", help="Window title or description")
+@click.option("--duration", "-d", type=int, default=30, help="Duration in minutes (default: 30)")
+@click.option("--category", "-c", default=None, help="Category (Work, Entertainment, etc.)")
+@click.option("--productive/--not-productive", default=None, help="Mark as productive or not")
+@click.option("--note", "-n", default=None, help="Additional note")
+def log(app: str, title: str, duration: int, category: str | None, productive: bool | None, note: str | None):
+    """Manually log an activity when automatic tracking fails.
+
+    Use this when ActivityWatch isn't running, you're on a device
+    without tracking, or you want to log something that wasn't captured.
+
+    Examples:
+        lifelogger log -a "Meeting" -t "Project standup" -d 30 -c Work --productive
+        lifelogger log -a "Reading" -t "Design Patterns book" -d 60 -c Learning
+        lifelogger log -a "Break" -t "Lunch" -d 45 --not-productive
+    """
+    from datetime import datetime, timedelta
+    from lifelogger.core.database import Database
+    from lifelogger.core.config import get_settings
+    import uuid
+
+    async def run():
+        settings = get_settings()
+        db = Database(settings)
+        await db.connect()
+
+        # Create event
+        now = datetime.now()
+        event = {
+            "timestamp": now - timedelta(minutes=duration),  # Started 'duration' ago
+            "device_id": "manual",
+            "source": "manual_log",
+            "app_name": app,
+            "window_title": title or None,
+            "url": None,
+            "duration_seconds": duration * 60,
+            "data": {"note": note} if note else None,
+            "classification": {
+                "event_type": "manual",
+                "category": category or "Uncategorized",
+                "subcategory": None,
+                "is_productive": productive,
+                "description": title or app,
+                "confidence": 1.0,
+            } if category or productive is not None else None,
+        }
+
+        try:
+            await db.insert_activity_event(**event)
+            console.print(f"[green]✓ Logged:[/green] {app}")
+            console.print(f"  Duration: {duration} minutes")
+            if title:
+                console.print(f"  Title: {title}")
+            if category:
+                console.print(f"  Category: {category}")
+            if productive is not None:
+                console.print(f"  Productive: {'Yes' if productive else 'No'}")
+            if note:
+                console.print(f"  Note: {note}")
+        except Exception as e:
+            console.print(f"[red]Error logging activity:[/red] {e}")
+        finally:
+            await db.disconnect()
+
+    asyncio.run(run())
+
+
+@main.command("quick-log")
+@click.argument("description")
+@click.option("--duration", "-d", type=int, default=30, help="Duration in minutes")
+def quick_log(description: str, duration: int):
+    """Quick one-liner activity log.
+
+    Examples:
+        lifelogger quick-log "Worked on API refactor" -d 60
+        lifelogger quick-log "Team meeting"
+        lifelogger quick-log "Coffee break" -d 15
+    """
+    from datetime import datetime, timedelta
+    from lifelogger.core.database import Database
+    from lifelogger.core.config import get_settings
+
+    async def run():
+        settings = get_settings()
+        db = Database(settings)
+        await db.connect()
+
+        now = datetime.now()
+        event = {
+            "timestamp": now - timedelta(minutes=duration),
+            "device_id": "manual",
+            "source": "quick_log",
+            "app_name": "Manual Entry",
+            "window_title": description,
+            "url": None,
+            "duration_seconds": duration * 60,
+            "data": None,
+            "classification": None,  # Will be classified by background worker
+        }
+
+        try:
+            await db.insert_activity_event(**event)
+            console.print(f"[green]✓ Logged ({duration}m):[/green] {description}")
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+        finally:
+            await db.disconnect()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     main()
